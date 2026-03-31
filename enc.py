@@ -76,12 +76,7 @@ class DownBlock(nn.Module):
         self.down_conv = nn.Sequential(
             nn.Conv2d(in_ch, out_ch,
                       kernel_size=3, stride=2, padding=1),  # downsample
-            nn.ReLU(inplace=True),
-
-            # Ek extra conv for feature refinement (stride=1, size same)
-            nn.Conv2d(out_ch, out_ch,
-                      kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=True)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -105,22 +100,16 @@ class UpBlock(nn.Module):
     def __init__(self, in_ch: int, skip_ch: int, out_ch: int):
         super().__init__()
 
-        # Bilinear upsample: nearest ke bajaye bilinear use karo
-        # artifacts kam hote hain.
-        # Yeh learnable nahi hai — sirf interpolation hai.
-        self.upsample = nn.Upsample(scale_factor=2,
-                                    mode='bilinear',
-                                    align_corners=False)
+        # Original U-Net: up-convolution (learnable)
+        # 2x2 kernel, stride=2 → resolution double karo
+        # in_ch → in_ch//2 (channels half karo, paper ke anusar)
+        self.up_conv = nn.ConvTranspose2d(in_ch, in_ch // 2,
+                                           kernel_size=2, stride=2)
 
-        # Skip connection ke baad channels double ho jaate hain:
-        # in_ch (from below) + skip_ch (from encoder) → out_ch
+        # Concatenation ke baad: (in_ch//2 + skip_ch) → out_ch
+        # Green block: Conv 3-1-1 + ReLU  (NeRD figure se)
         self.conv = nn.Sequential(
-            nn.Conv2d(in_ch + skip_ch, out_ch,
-                      kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-
-            # Ek aur conv for better feature fusion
-            nn.Conv2d(out_ch, out_ch,
+            nn.Conv2d(in_ch // 2 + skip_ch, out_ch,
                       kernel_size=3, stride=1, padding=1),
             nn.ReLU(inplace=True),
         )
@@ -128,7 +117,7 @@ class UpBlock(nn.Module):
     def forward(self, x: torch.Tensor,
                 skip: torch.Tensor) -> torch.Tensor:
         # Step 1: Resolution double karo
-        x = self.upsample(x)
+        x = self.up_conv(x)
 
         # Step 2: Agar size mismatch ho toh crop karo
         # (Odd size images mein yeh ho sakta hai)
@@ -189,8 +178,7 @@ class NeRDEncoder(nn.Module):
         # Conv 3-1-1: kernel=3, stride=1, padding=1
         self.initial_conv = nn.Sequential(
             nn.Conv2d(in_channels, base_ch,
-                      kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
+                      kernel_size=3, stride=1, padding=1)
         )
         # Shape: [B, 1, H, W] → [B, 128, H, W]
 
@@ -203,21 +191,24 @@ class NeRDEncoder(nn.Module):
         )
         # Shape: [B, 128, H, W] → [B, 128, H, W]  (unchanged)
 
-        # ── Step 3: U-Net Encoder (4 Downsampling Stages) ───
+        # ── Step 3: Post EDSR gray Conv Block 3-1-1 ───
+        self.post_edsr_conv = nn.Conv2d(base_ch, base_ch, kernel_size=3, stride=1, padding=1)
+
+        # ── Step 4: U-Net Encoder (4 Downsampling Stages) ───
         # Har stage mein resolution half hoti hai,
         # aur channels badhte hain (zyada abstract features).
 
         # Stage 1: 128 → 128, H → H/2
-        self.down1 = DownBlock(base_ch,      base_ch)
+        self.down1 = DownBlock(base_ch, base_ch)
 
         # Stage 2: 128 → 256, H/2 → H/4
-        self.down2 = DownBlock(base_ch,      base_ch * 2)
+        self.down2 = DownBlock(base_ch, base_ch * 2)
 
         # Stage 3: 256 → 512, H/4 → H/8
-        self.down3 = DownBlock(base_ch * 2,  base_ch * 4)
+        self.down3 = DownBlock(base_ch * 2, base_ch * 4)
 
         # Stage 4: 512 → 512, H/8 → H/16 (bottleneck — sabse abstract)
-        self.down4 = DownBlock(base_ch * 4,  base_ch * 4)
+        self.down4 = DownBlock(base_ch * 4, base_ch * 4)
 
         # ── Step 4: U-Net Decoder (4 Upsampling Stages) ─────
         # Har stage mein:
@@ -264,6 +255,7 @@ class NeRDEncoder(nn.Module):
 
         # 8 ResBlocks: local + global patterns seekho
         x_edsr = self.edsr_blocks(x0)
+        x_edsr = self.post_edsr_conv(x_edsr)
         # [B, 128, H, W] → [B, 128, H, W]
         # x_edsr ko baad mein skip connection ke liye save kiya
 

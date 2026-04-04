@@ -1,4 +1,4 @@
-import SirenLayer
+from SirenLayer import SirenLayer
 import torch
 import torch.nn as nn
 

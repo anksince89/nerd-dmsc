@@ -27,7 +27,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import helper
+import EDSRResBlock
+import UNet
 
 class NeRDEncoder(nn.Module):
 
@@ -57,7 +58,7 @@ class NeRDEncoder(nn.Module):
         # deep patterns seekhne deta hai bina gradient
         # vanishing ke. Figure mein "8x" yahi dikhata hai.
         self.edsr_blocks = nn.Sequential(
-            *[helper.EDSRResBlock(channels=base_ch) for _ in range(8)]
+            *[EDSRResBlock.EDSRResBlock(channels=base_ch) for _ in range(8)]
         )
         # Shape: [B, 128, H, W] → [B, 128, H, W]  (unchanged)
 
@@ -69,16 +70,16 @@ class NeRDEncoder(nn.Module):
         # aur channels badhte hain (zyada abstract features).
 
         # Stage 1: 128 → 128, H → H/2
-        self.down1 = helper.DownBlock(base_ch, base_ch)
+        self.down1 = UNet.DownBlock(base_ch, base_ch)
 
         # Stage 2: 128 → 256, H/2 → H/4
-        self.down2 = helper.DownBlock(base_ch, base_ch * 2)
+        self.down2 = UNet.DownBlock(base_ch, base_ch * 2)
 
         # Stage 3: 256 → 512, H/4 → H/8
-        self.down3 = helper.DownBlock(base_ch * 2, base_ch * 4)
+        self.down3 = UNet.DownBlock(base_ch * 2, base_ch * 4)
 
         # Stage 4: 512 → 512, H/8 → H/16 (bottleneck — sabse abstract)
-        self.down4 = helper.DownBlock(base_ch * 4, base_ch * 4)
+        self.down4 = UNet.DownBlock(base_ch * 4, base_ch * 4)
 
         # ── Step 4: U-Net Decoder (4 Upsampling Stages) ─────
         # Har stage mein:
@@ -87,20 +88,20 @@ class NeRDEncoder(nn.Module):
         #   3. Conv se refine karo
 
         # Up1: (512 from below + 512 skip from down3) → 256, H/8
-        self.up1 = helper.UpBlock(in_ch=base_ch*4, skip_ch=base_ch*4,
+        self.up1 = UNet.UpBlock(in_ch=base_ch*4, skip_ch=base_ch*4,
                            out_ch=base_ch*2)
 
         # Up2: (256 from below + 256 skip from down2) → 128, H/4
-        self.up2 = helper.UpBlock(in_ch=base_ch*2, skip_ch=base_ch*2,
+        self.up2 = UNet.UpBlock(in_ch=base_ch*2, skip_ch=base_ch*2,
                            out_ch=base_ch)
 
         # Up3: (128 from below + 128 skip from down1) → 128, H/2
-        self.up3 = helper.UpBlock(in_ch=base_ch,   skip_ch=base_ch,
+        self.up3 = UNet.UpBlock(in_ch=base_ch,   skip_ch=base_ch,
                            out_ch=base_ch)
 
         # Up4: (128 from below + 128 skip from EDSR) → 128, H
         # EDSR output directly yahan aata hai as skip connection
-        self.up4 = helper.UpBlock(in_ch=base_ch,   skip_ch=base_ch,
+        self.up4 = UNet.UpBlock(in_ch=base_ch,   skip_ch=base_ch,
                            out_ch=base_ch)
 
         # ── Step 5: Final 1×1 Conv ───────────────────────────

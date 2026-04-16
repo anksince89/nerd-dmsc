@@ -230,7 +230,9 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
 @torch.no_grad()
 def validate(model, val_paths, device):
     """
-    Full-image validation (no cropping) — paper style.
+    Full-image validation (no resizing/cropping to 200×200).
+    This is not the same protocol as Table 1 in the paper,
+    which reports Kodak* / McM* after resizing and cropping.
     Returns avg PSNR (dB) and avg SSIM over all val images.
     """
     model.eval()

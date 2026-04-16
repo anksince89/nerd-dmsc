@@ -24,7 +24,7 @@ import NeRD
 
 CFG = {
     # Paper values
-    "batch_size"   : 5,        # paper: 5
+    "batch_size"   : 5,        # paper effective batch: 5
     "patch_size"   : 200,      # paper: 200×200
     "epoch_iters"  : 10_000,   # paper: 10000 iters per epoch
     "lr"           : 1e-4,     # paper: 0.0001
@@ -35,6 +35,13 @@ CFG = {
     "epochs"       : 50,
     "patience"     : 10,       # early stopping
     "num_workers"  : 4,
+    "micro_batch_size": 1,     # fits low-VRAM GPUs
+    "train_row_chunk_size": 8, # decoder rows per backward chunk
+    "train_col_chunk_size": 200,
+    "train_pixel_chunk_size": 4096,
+    "val_row_chunk_size": 8,
+    "val_col_chunk_size": 256,
+    "val_pixel_chunk_size": 4096,
     "seed"         : 42,
     "save_dir"     : "checkpoints",
 
@@ -76,7 +83,8 @@ class DemosaickDataset(Dataset):
     """
     Each call to __getitem__ picks a random image
     and returns a fresh random 200×200 crop.
-    length = epoch_iters × batch_size → one epoch = 10000 iters
+    length = epoch_iters × effective_batch_size
+    so that gradient accumulation still matches 10000 optimizer steps.
     """
     def __init__(self, image_paths, patch_size=200,
                  epoch_iters=10_000, batch_size=5):
@@ -138,6 +146,32 @@ def batch_metrics(pred: torch.Tensor,
                      data_range=1.0,
                      size_average=True).item()
     return {"psnr": p, "ssim": s}
+
+
+def pad_to_multiple(x: torch.Tensor,
+                    multiple: int = 16) -> tuple[torch.Tensor, tuple[int, int]]:
+    """
+    Pad only on bottom/right so validation can be done on the whole image.
+    """
+    _, _, H, W = x.shape
+    pad_h = (multiple - (H % multiple)) % multiple
+    pad_w = (multiple - (W % multiple)) % multiple
+
+    if pad_h == 0 and pad_w == 0:
+        return x, (0, 0)
+
+    x = F.pad(x, (0, pad_w, 0, pad_h), mode='reflect')
+    return x, (pad_h, pad_w)
+
+
+def remove_padding(x: torch.Tensor,
+                   pad_h: int,
+                   pad_w: int) -> torch.Tensor:
+    if pad_h > 0:
+        x = x[:, :, :-pad_h, :]
+    if pad_w > 0:
+        x = x[:, :, :, :-pad_w]
+    return x
 
 # ─────────────────────────────────────────────────────────────
 # EARLY STOPPING
@@ -203,21 +237,68 @@ def load_ckpt(path, model, optimizer=None, scheduler=None):
 # TRAIN ONE EPOCH
 # ─────────────────────────────────────────────────────────────
 
-def train_one_epoch(model, loader, criterion, optimizer, device):
+def train_one_epoch(model,
+                    loader,
+                    optimizer,
+                    device,
+                    accum_steps: int,
+                    row_chunk_size: int,
+                    col_chunk_size: int,
+                    pixel_chunk_size: int):
     model.train()
     total_loss = 0.0
+    optimizer.zero_grad(set_to_none=True)
+    micro_steps = 0
 
     for bayer, rgb_gt in loader:
         bayer  = bayer.to(device,  non_blocking=True)
         rgb_gt = rgb_gt.to(device, non_blocking=True)
+        xi = model.encode(bayer)
 
-        optimizer.zero_grad()
-        rgb_pred = model(bayer)                    # [B, 3, H, W]
-        loss     = criterion(rgb_pred, rgb_gt)     # MSE
-        loss.backward()
+        _, _, H, W = rgb_gt.shape
+        batch_elems = rgb_gt.numel()
+        row_chunk = H if row_chunk_size is None else row_chunk_size
+        col_chunk = W if col_chunk_size is None else col_chunk_size
+
+        num_row_tiles = math.ceil(H / row_chunk)
+        num_col_tiles = math.ceil(W / col_chunk)
+        total_tiles = num_row_tiles * num_col_tiles
+        tile_idx = 0
+        batch_sse = 0.0
+
+        for row_start in range(0, H, row_chunk):
+            row_end = min(row_start + row_chunk, H)
+
+            for col_start in range(0, W, col_chunk):
+                col_end = min(col_start + col_chunk, W)
+                tile_idx += 1
+
+                pred_tile = model.decode_chunk(
+                    xi,
+                    row_start=row_start,
+                    row_end=row_end,
+                    col_start=col_start,
+                    col_end=col_end,
+                    pixel_chunk_size=pixel_chunk_size)
+                gt_tile = rgb_gt[:, :, row_start:row_end, col_start:col_end]
+
+                tile_sse = F.mse_loss(pred_tile, gt_tile, reduction="sum")
+                batch_sse += tile_sse.detach().item()
+
+                scaled_loss = tile_sse / (batch_elems * accum_steps)
+                scaled_loss.backward(retain_graph=(tile_idx < total_tiles))
+
+        total_loss += batch_sse / batch_elems
+        micro_steps += 1
+
+        if micro_steps == accum_steps:
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            micro_steps = 0
+
+    if micro_steps > 0:
         optimizer.step()
-
-        total_loss += loss.item()
+        optimizer.zero_grad(set_to_none=True)
 
     avg_loss = total_loss / len(loader)
     avg_psnr = -10.0 * math.log10(avg_loss + 1e-10)
@@ -244,15 +325,19 @@ def validate(model, val_paths, device):
                    np.array(img, dtype=np.float32)
                ).permute(2, 0, 1).unsqueeze(0) / 255.0   # [1,3,H,W]
 
-        # Crop to multiple of 16 (4 down-samples in encoder)
-        _, _, H, W = rgb.shape
-        H = (H // 16) * 16
-        W = (W // 16) * 16
-        rgb   = rgb[:, :, :H, :W].to(device)
-        bayer = rgb_to_bayer(rgb.squeeze(0)).unsqueeze(0).to(device)
+        rgb = rgb.to(device)
+        rgb_pad, (pad_h, pad_w) = pad_to_multiple(rgb, multiple=16)
+        bayer = rgb_to_bayer(rgb_pad.squeeze(0)).unsqueeze(0).to(device)
 
-        pred  = model(bayer).clamp(0.0, 1.0)       # [1,3,H,W]
-        m     = batch_metrics(pred, rgb)
+        xi = model.encode(bayer)
+        pred_pad = model.decode_image(
+            xi,
+            row_chunk_size=CFG["val_row_chunk_size"],
+            col_chunk_size=CFG["val_col_chunk_size"],
+            pixel_chunk_size=CFG["val_pixel_chunk_size"])
+        pred = remove_padding(pred_pad, pad_h, pad_w).clamp(0.0, 1.0)
+
+        m = batch_metrics(pred, rgb)
         psnr_list.append(m["psnr"])
         ssim_list.append(m["ssim"])
 
@@ -270,6 +355,9 @@ def main(resume_path: str = None):
     set_seed(CFG["seed"])
     os.makedirs(CFG["save_dir"], exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    assert CFG["batch_size"] % CFG["micro_batch_size"] == 0, \
+        "batch_size must be divisible by micro_batch_size"
+    accum_steps = CFG["batch_size"] // CFG["micro_batch_size"]
 
     # ── Paths ──
     exts        = ("*.png", "*.jpg", "*.jpeg", "*.bmp")
@@ -282,6 +370,9 @@ def main(resume_path: str = None):
     print(f"Device      : {device}")
     print(f"Train images: {len(train_paths)}")
     print(f"Val images  : {len(val_paths)}")
+    print(f"Effective BS: {CFG['batch_size']}")
+    print(f"Micro BS    : {CFG['micro_batch_size']}")
+    print(f"Accum steps : {accum_steps}")
 
     # ── Dataset & Loader ──
     train_ds = DemosaickDataset(
@@ -292,7 +383,7 @@ def main(resume_path: str = None):
 
     train_loader = DataLoader(
                        train_ds,
-                       batch_size  = CFG["batch_size"],
+                       batch_size  = CFG["micro_batch_size"],
                        shuffle     = True,
                        num_workers = CFG["num_workers"],
                        pin_memory  = True,
@@ -302,8 +393,7 @@ def main(resume_path: str = None):
     model = NeRD.NeRD(in_ch=1, out_ch=3).to(device)
     print(f"Parameters  : {sum(p.numel() for p in model.parameters()):,}")
 
-    # ── Loss / Optimizer / Scheduler ──
-    criterion = nn.MSELoss()
+    # ── Optimizer / Scheduler ──
     optimizer = torch.optim.Adam(model.parameters(),
                                   lr    = CFG["lr"],
                                   betas = CFG["betas"])
@@ -332,7 +422,15 @@ def main(resume_path: str = None):
     for epoch in range(start_epoch, CFG["epochs"] + 1):
 
         # Train
-        t = train_one_epoch(model, train_loader, criterion, optimizer, device)
+        t = train_one_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            accum_steps=accum_steps,
+            row_chunk_size=CFG["train_row_chunk_size"],
+            col_chunk_size=CFG["train_col_chunk_size"],
+            pixel_chunk_size=CFG["train_pixel_chunk_size"])
 
         # Validate
         v = validate(model, val_paths, device)

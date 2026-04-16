@@ -59,6 +59,38 @@ def extract_local_encoding(xi: torch.Tensor,
 
     return local_enc
 
+
+def extract_local_encoding_chunk(xi: torch.Tensor,
+                                 row_start: int,
+                                 row_end: int,
+                                 col_start: int = 0,
+                                 col_end: int = None,
+                                 patch_size: int = 5) -> torch.Tensor:
+    """
+    Global encoding ka sirf ek spatial chunk extract karo.
+
+    This keeps memory low during training/inference because we avoid
+    materializing the full [B, H, W, 3200] tensor at once.
+    """
+    B, C, H, W = xi.shape
+    if col_end is None:
+        col_end = W
+
+    pad = patch_size // 2
+    rows = row_end - row_start
+    cols = col_end - col_start
+
+    xi_padded = F.pad(xi, (pad, pad, pad, pad), mode='reflect')
+    xi_chunk = xi_padded[:, :,
+                         row_start:row_end + 2 * pad,
+                         col_start:col_end + 2 * pad]
+
+    patches = xi_chunk.unfold(2, patch_size, 1).unfold(3, patch_size, 1)
+    local_enc = patches.reshape(B, C, rows, cols, -1)
+    local_enc = local_enc.reshape(B, C * patch_size * patch_size, rows, cols)
+    local_enc = local_enc.permute(0, 2, 3, 1).contiguous()
+    return local_enc
+
 # ─────────────────────────────────────────────────────────
 # STEP 2: Spatial Coordinates Generator
 # Har pixel ke liye normalized (x,y) ∈ [-1, 1]
@@ -84,6 +116,40 @@ def make_coords(B: int, H: int, W: int,
     coords = coords.unsqueeze(0).expand(B, -1, -1, -1)
     # [B, H, W, 2]
 
+    return coords
+
+
+def _axis_coords(start: int,
+                 end: int,
+                 size: int,
+                 device: torch.device) -> torch.Tensor:
+    if size <= 1:
+        return torch.zeros(end - start, device=device)
+
+    idx = torch.arange(start, end, device=device, dtype=torch.float32)
+    return idx * (2.0 / (size - 1)) - 1.0
+
+
+def make_coords_chunk(B: int,
+                      H: int,
+                      W: int,
+                      device: torch.device,
+                      row_start: int,
+                      row_end: int,
+                      col_start: int = 0,
+                      col_end: int = None) -> torch.Tensor:
+    """
+    Generate normalized coordinates only for one chunk.
+    """
+    if col_end is None:
+        col_end = W
+
+    ys = _axis_coords(row_start, row_end, H, device)
+    xs = _axis_coords(col_start, col_end, W, device)
+
+    grid_y, grid_x = torch.meshgrid(ys, xs, indexing='ij')
+    coords = torch.stack([grid_y, grid_x], dim=-1)
+    coords = coords.unsqueeze(0).expand(B, -1, -1, -1).contiguous()
     return coords
 
 # ────────────────────────────────────────────────────────────

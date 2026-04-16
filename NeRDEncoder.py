@@ -127,6 +127,7 @@ class NeRDEncoder(nn.Module):
         # 8 ResBlocks: local + global patterns seekho
         x_edsr = self.edsr_blocks(x0)
         x_edsr = self.post_edsr_conv(x_edsr)
+        x_edsr = x_edsr + x0
         # [B, 128, H, W] → [B, 128, H, W]
         # x_edsr ko baad mein skip connection ke liye save kiya
 

@@ -37,9 +37,9 @@ class SirenLayer(nn.Module):
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.linear(x)
-        if not self.is_last:
+        if self.is_last:
             return out
-        
+
         out.mul_(self.omega_0)
         out.sin_()
         return out

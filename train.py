@@ -24,7 +24,7 @@ import NeRD
 
 CFG = {
     # Paper values
-    "batch_size"   : 5,        # paper: 5
+    "batch_size"   : 4,        # paper: 5
     "patch_size"   : 200,      # paper: 200×200
     "epoch_iters"  : 10_000,   # paper: 10000 iters per epoch
     "lr"           : 1e-4,     # paper: 0.0001

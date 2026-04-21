@@ -32,14 +32,14 @@ CFG = {
     "betas"        : (0.9, 0.999),
 
     # Training control
-    "epochs"       : 50,
+    "epochs"       : 15,
     "patience"     : 10,       # early stopping
     "num_workers"  : 4,
     "seed"         : 42,
     "save_dir"     : "checkpoints",
 
     # Paths
-    "train_dir"    : "data/train",   # DIV2K + Flickr2K + OST
+    "train_dir"    : "/kaggle/input/div2k-dataset/DIV2K_train_HR",   # DIV2K + Flickr2K + OST
     "val_dir"      : "data/val",     # Kodak or McM
 }
 

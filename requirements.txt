@@ -1,0 +1,7 @@
+torch
+torchvision
+numpy
+pillow
+pytorch-msssim
+opencv-python
+tqdm

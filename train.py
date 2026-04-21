@@ -290,21 +290,14 @@ def main(resume_path: str = None):
                    epoch_iters = CFG["epoch_iters"],
                    batch_size  = CFG["batch_size"])
 
-    #train_loader = DataLoader(
-    #                   train_ds,
-    #                   batch_size  = CFG["batch_size"],
-    #                   shuffle     = True,
-    #                   num_workers = CFG["num_workers"],
-    #                   pin_memory  = True,
-    #                   drop_last   = True)
     train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True,
-        persistent_workers=True
-    )
+                       train_ds,
+                       batch_size  = CFG["batch_size"],
+                       shuffle     = True,
+                       num_workers = CFG["num_workers"],
+                       pin_memory  = True,
+                       drop_last   = True,
+                       persistent_workers=True)
 
     # ── Model (from NeRD.py) ──
     model = NeRD.NeRD(in_ch=1, out_ch=3).to(device)

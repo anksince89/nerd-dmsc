@@ -26,13 +26,13 @@ CFG = {
     # Paper values
     "batch_size"   : 8,        # paper: 5
     "patch_size"   : 200,      # paper: 200×200
-    "epoch_iters"  : 1000,   # paper: 10000 iters per epoch
+    "epoch_iters"  : 10000,   # paper: 10000 iters per epoch
     "lr"           : 1e-4,     # paper: 0.0001
     "lr_gamma"     : 0.95,     # paper: decay × 0.95 per epoch
     "betas"        : (0.9, 0.999),
 
     # Training control
-    "epochs"       : 15,
+    "epochs"       : 80,
     "patience"     : 10,       # early stopping
     "num_workers"  : 4,
     "seed"         : 42,

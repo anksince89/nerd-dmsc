@@ -151,5 +151,5 @@ class NeRDEncoder(nn.Module):
         #   fine details directly final decoder tak pohonchti hain
 
         # [B, 128, H, W] = global encoding ξ
-
-        return u4
+        return self.final_conv(u4)
+        #return u4

@@ -48,8 +48,9 @@ class SirenMLP(nn.Module):
         Output:   [N, 3]     RGB values in [0,1]
         """
         # saving input for skip connection
-        skip = x                              # [N, 3202]
-
+        #skip = x                              # [N, 3202]
+        skip = x[..., :3200]             # 3200 dims only
+        h = torch.cat([feat_skip, h], dim=-1) # 3200 + 256 (feat first, like author)
         h = self.layer1(x)                    # [N, 256]
         h = self.layer2(h)                    # [N, 256]
 

@@ -170,12 +170,15 @@ class BayerDataset(Dataset):
 
         # Numpy → Torch tensors
         # Bayer: [H,W] → [1,H,W] (channel dimension add karo)
-        bayer_t = torch.from_numpy(bayer).unsqueeze(0)   # [1, 200, 200]
-
+        #bayer_t = torch.from_numpy(bayer).unsqueeze(0)   # [1, 200, 200]
+        imNorm  = lambda x: (x - 0.5) * 2
+        bayer_t = imNorm(torch.from_numpy(bayer).unsqueeze(0))  # [-1, 1]
+                                          # [-1, 1]
         # RGB target: [H,W,3] → [3,H,W] (channels first for PyTorch)
         rgb_t   = torch.from_numpy(
             img.transpose(2, 0, 1)                        # [3, 200, 200]
         )
+        rgb_t   = imNorm(rgb_t)
 
         return bayer_t, rgb_t
     

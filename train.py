@@ -24,7 +24,7 @@ import NeRD
 
 CFG = {
     # Paper values
-    "batch_size"   : 4,        # paper: 5
+    "batch_size"   : 8,        # paper: 5
     "patch_size"   : 200,      # paper: 200×200
     "epoch_iters"  : 1000,   # paper: 10000 iters per epoch
     "lr"           : 1e-4,     # paper: 0.0001
@@ -39,7 +39,7 @@ CFG = {
     "save_dir"     : "checkpoints",
 
     # Paths
-    "train_dir"    : "/kaggle/input/datasets/joe1995/div2k-dataset/DIV2K_train_HR/DIV2K_train_HR",   # DIV2K + Flickr2K + OST
+    "train_dir"    : "./extracted_data/DIV2K_train_HR/DIV2K_train_HR",   # DIV2K + Flickr2K + OST
     "val_dir"      : "data/val",     # Kodak or McM
 }
 

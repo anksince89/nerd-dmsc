@@ -39,7 +39,7 @@ CFG = {
     "save_dir"     : "checkpoints",
 
     # Paths
-    "train_dir"    : "./extracted_data/DIV2K_train_HR/DIV2K_train_HR",   # DIV2K + Flickr2K + OST
+    "train_dir"    : "./content/data/",   # DIV2K + Flickr2K + OST
     "val_dir"      : "data/val",     # Kodak or McM
 }
 

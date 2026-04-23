@@ -23,48 +23,49 @@ class SirenMLP(nn.Module):
 
         self.in_dim = in_dim
 
-        # Layer 1 — first layer, ω₀=30
-        self.layer1 = SirenLayer(in_dim, hidden, omega_0=omega_0, is_first=True)
+        # The author release uses omega_0=30 for all hidden sine layers and
+        # does not mark the first layer as "is_first" for initialization.
+        self.layer1 = SirenLayer(in_dim, hidden, omega_0=omega_0, is_first=False)
 
         # Layer 2 — hidden(256)
-        self.layer2 = SirenLayer(hidden, hidden, omega_0=1.0)
+        self.layer2 = SirenLayer(hidden, hidden, omega_0=omega_0)
 
         # Layer 3 — skip: input concatenated before this layer
         # in_dim = hidden(256) + original_input(3202) = 3458
-        self.layer3 = SirenLayer(hidden + in_dim, hidden, omega_0=1.0)
+        self.layer3 = SirenLayer(hidden + in_dim - 2, hidden, omega_0=omega_0)
 
         # Layer 4 — hidden(256)
-        self.layer4 = SirenLayer(hidden, hidden, omega_0=1.0)
+        self.layer4 = SirenLayer(hidden, hidden, omega_0=omega_0)
 
         # Layer 5 — skip: input concatenated before this layer
-        self.layer5 = SirenLayer(hidden + in_dim,  hidden, omega_0=1.0)
+        self.layer5 = SirenLayer(hidden + in_dim - 2,  hidden, omega_0=omega_0)
 
-        # Output layer — linear, no sine activation
-        self.out = SirenLayer(hidden, out_dim, omega_0=1.0, is_last=True)
+        # Output layer — author's release uses a plain Linear head.
+        self.out = nn.Linear(hidden, out_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Input:  x [N, 3202]  where N = B*H*W
-        Output:   [N, 3]     RGB values in [0,1]
+        Output:   [N, 3]     RGB values before clamping
         """
-        # saving input for skip connection
-        #skip = x                              # [N, 3202]
-        skip = x[..., :3200]             # 3200 dims only
-        h = torch.cat([feat_skip, h], dim=-1) # 3200 + 256 (feat first, like author)
-        h = self.layer1(x)                    # [N, 256]
-        h = self.layer2(h)                    # [N, 256]
+        # Match the author implementation: only the 3200-d feature vector
+        # is reused in the MLP skip connections, not the (x, y) coordinates.
+        skip = x[..., :3200]
 
-        h = torch.cat([h, skip], dim=-1)
+        h = self.layer1(x)
+        h = self.layer2(h)
+
+        h = torch.cat([skip, h], dim=-1)
         h = self.layer3(h)
         # [N, 256+3202] → [N, 256]  ← skip at layer 3
 
         h = self.layer4(h) # [N, 256]
 
-        h = torch.cat([h, skip], dim=-1)
+        h = torch.cat([skip, h], dim=-1)
         h = self.layer5(h)
         # [N, 256+3202] → [N, 256]  ← skip at layer 5
 
         rgb = self.out(h) # [N, 3]
 
-        return rgb # [N, 3] in [0, 1]
+        return rgb
     

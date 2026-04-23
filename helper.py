@@ -39,22 +39,13 @@ def extract_local_encoding(xi: torch.Tensor,
     xi_padded = F.pad(xi, (pad, pad, pad, pad), mode='reflect')
     # [B, 128, H+4, W+4]
 
-    # unfold se sliding 5×5 windows extract karo
-    # unfold(dimension, size, step)
-    patches = xi_padded \
-        .unfold(2, patch_size, 1) \
-        .unfold(3, patch_size, 1)
-    # [B, 128, H, W, 5, 5]
+    # F.unfold author ke implementation ke saath align karta hai:
+    # har pixel location ke liye 5x5 receptive field ko
+    # [C * 5 * 5] vector ke roop mein nikalta hai.
+    patches = F.unfold(xi_padded, kernel_size=patch_size)
+    # [B, 128*25, H*W]
 
-    # Flatten: 128 channels × 5×5 = 3200
-    local_enc = patches.reshape(B, C, H, W, -1)
-    # [B, 128, H, W, 25]
-
-    local_enc = local_enc.reshape(B, C * patch_size * patch_size, H, W)
-    # [B, 3200, H, W]
-
-    # Permute for MLP-friendly format: pixel-first
-    local_enc = local_enc.permute(0, 2, 3, 1)
+    local_enc = patches.transpose(1, 2).reshape(B, H, W, C * patch_size * patch_size)
     # [B, H, W, 3200]
 
     return local_enc

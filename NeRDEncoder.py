@@ -87,16 +87,16 @@ class NeRDEncoder(nn.Module):
         #   2. Encoder ka skip feature concatenate hota hai
         #   3. Conv se refine karo
 
-        # Up1: (512 from below + 512 skip from down3) → 256, H/8
+        # Up1: (512 from below + 512 skip from down3) → 512, H/8
         self.up1 = UNet.UpBlock(in_ch=base_ch*4, skip_ch=base_ch*4,
+                           out_ch=base_ch*4)
+
+        # Up2: (512 from below + 256 skip from down2) → 256, H/4
+        self.up2 = UNet.UpBlock(in_ch=base_ch*4, skip_ch=base_ch*2,
                            out_ch=base_ch*2)
 
-        # Up2: (256 from below + 256 skip from down2) → 128, H/4
-        self.up2 = UNet.UpBlock(in_ch=base_ch*2, skip_ch=base_ch*2,
-                           out_ch=base_ch)
-
-        # Up3: (128 from below + 128 skip from down1) → 128, H/2
-        self.up3 = UNet.UpBlock(in_ch=base_ch,   skip_ch=base_ch,
+        # Up3: (256 from below + 128 skip from down1) → 128, H/2
+        self.up3 = UNet.UpBlock(in_ch=base_ch*2,   skip_ch=base_ch,
                            out_ch=base_ch)
 
         # Up4: (128 from below + 128 skip from EDSR) → 128, H
@@ -107,8 +107,7 @@ class NeRDEncoder(nn.Module):
         # ── Step 5: Final 1×1 Conv ───────────────────────────
         # Output channels ko 128 par confirm karo.
         # 1×1 conv = channel mixing, spatial size same.
-        self.final_conv = nn.Conv2d(base_ch, base_ch,
-                                    kernel_size=1)
+        self.final_conv = nn.Identity()
         # Final output: [B, 128, H, W] = global encoding ξ
 
     def forward(self, bayer: torch.Tensor) -> torch.Tensor:
@@ -141,8 +140,8 @@ class NeRDEncoder(nn.Module):
         # Har up step mein corresponding down ka output
         # skip connection ke roop mein diya jaata hai.
 
-        u1 = self.up1(d4, d3)      # d4 upsample + d3 skip → [B, 256, H/8, W/8]
-        u2 = self.up2(u1, d2)      # u1 upsample + d2 skip → [B, 128, H/4, W/4]
+        u1 = self.up1(d4, d3)      # d4 upsample + d3 skip → [B, 512, H/8, W/8]
+        u2 = self.up2(u1, d2)      # u1 upsample + d2 skip → [B, 256, H/4, W/4]
         u3 = self.up3(u2, d1)      # u2 upsample + d1 skip → [B, 128, H/2, W/2]
         u4 = self.up4(u3, x_edsr)  # u3 upsample + EDSR skip→ [B, 128, H,   W]
         #                  ↑

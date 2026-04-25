@@ -1,5 +1,5 @@
 # train.py
-# NeRD model NeRD.py se import ho raha hai — yahan sirf training logic hai
+# Model import yahan swap hota hai — training loop generic hai.
 # pip install pytorch-msssim
 
 import os
@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torch.utils.data      import Dataset, DataLoader
 from pytorch_msssim        import ssim as compute_ssim   # SSIM metric
 
-import NeRD
+import gbtf_nn
 
 
 # ─────────────────────────────────────────────────────────────
@@ -299,8 +299,8 @@ def main(resume_path: str = None):
                        drop_last   = True,
                        persistent_workers=True)
 
-    # ── Model (from NeRD.py) ──
-    model = NeRD.NeRD(in_ch=1, out_ch=3).to(device)
+    # ── Model ──
+    model = gbtf_nn.gbtf_nn(in_ch=1, out_ch=3).to(device)
     print(f"Parameters  : {sum(p.numel() for p in model.parameters()):,}")
 
     # ── Loss / Optimizer / Scheduler ──

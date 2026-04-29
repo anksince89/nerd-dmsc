@@ -1,6 +1,6 @@
 import math
 from collections import OrderedDict
-from typing import Dict, Tuple
+from typing import Dict
 
 import torch
 import torch.nn as nn
@@ -9,15 +9,14 @@ import torch.nn.functional as F
 import NeRDPixelDecoder
 
 
-def _to_pair(value) -> Tuple[int, int]:
-    if isinstance(value, tuple):
-        return value
-    return (value, value)
+def _normalize_kernel(kernel: torch.Tensor) -> torch.Tensor:
+    kernel = kernel - kernel.mean()
+    return kernel / kernel.abs().sum().clamp_min(1e-6)
 
 
 def rgb_to_bayer(rgb: torch.Tensor, pattern: str = "gbrg") -> torch.Tensor:
     """
-    RGB [B,3,H,W] or [3,H,W] in [0,1] -> Bayer [B,1,H,W] / [1,H,W].
+    RGB [B,3,H,W] or [3,H,W] in [0,1] -> Bayer [B,1,H,W] or [1,H,W].
     """
     pattern = pattern.lower()
     squeeze = rgb.dim() == 3
@@ -27,29 +26,30 @@ def rgb_to_bayer(rgb: torch.Tensor, pattern: str = "gbrg") -> torch.Tensor:
     if rgb.dim() != 4 or rgb.shape[1] != 3:
         raise ValueError("rgb_to_bayer expects [3,H,W] or [B,3,H,W] input.")
 
-    bayer = torch.zeros(rgb.shape[0], 1, rgb.shape[2], rgb.shape[3],
-                        device=rgb.device, dtype=rgb.dtype)
+    bayer = torch.zeros(
+        rgb.shape[0], 1, rgb.shape[2], rgb.shape[3], device=rgb.device, dtype=rgb.dtype
+    )
 
     if pattern == "gbrg":
-        bayer[:, 0, 0::2, 0::2] = rgb[:, 1, 0::2, 0::2]  # Gb
-        bayer[:, 0, 0::2, 1::2] = rgb[:, 2, 0::2, 1::2]  # B
-        bayer[:, 0, 1::2, 0::2] = rgb[:, 0, 1::2, 0::2]  # R
-        bayer[:, 0, 1::2, 1::2] = rgb[:, 1, 1::2, 1::2]  # Gr
+        bayer[:, 0, 0::2, 0::2] = rgb[:, 1, 0::2, 0::2]
+        bayer[:, 0, 0::2, 1::2] = rgb[:, 2, 0::2, 1::2]
+        bayer[:, 0, 1::2, 0::2] = rgb[:, 0, 1::2, 0::2]
+        bayer[:, 0, 1::2, 1::2] = rgb[:, 1, 1::2, 1::2]
     elif pattern == "grbg":
-        bayer[:, 0, 0::2, 0::2] = rgb[:, 1, 0::2, 0::2]  # Gr
-        bayer[:, 0, 0::2, 1::2] = rgb[:, 0, 0::2, 1::2]  # R
-        bayer[:, 0, 1::2, 0::2] = rgb[:, 2, 1::2, 0::2]  # B
-        bayer[:, 0, 1::2, 1::2] = rgb[:, 1, 1::2, 1::2]  # Gb
+        bayer[:, 0, 0::2, 0::2] = rgb[:, 1, 0::2, 0::2]
+        bayer[:, 0, 0::2, 1::2] = rgb[:, 0, 0::2, 1::2]
+        bayer[:, 0, 1::2, 0::2] = rgb[:, 2, 1::2, 0::2]
+        bayer[:, 0, 1::2, 1::2] = rgb[:, 1, 1::2, 1::2]
     elif pattern == "rggb":
-        bayer[:, 0, 0::2, 0::2] = rgb[:, 0, 0::2, 0::2]  # R
-        bayer[:, 0, 0::2, 1::2] = rgb[:, 1, 0::2, 1::2]  # Gr
-        bayer[:, 0, 1::2, 0::2] = rgb[:, 1, 1::2, 0::2]  # Gb
-        bayer[:, 0, 1::2, 1::2] = rgb[:, 2, 1::2, 1::2]  # B
+        bayer[:, 0, 0::2, 0::2] = rgb[:, 0, 0::2, 0::2]
+        bayer[:, 0, 0::2, 1::2] = rgb[:, 1, 0::2, 1::2]
+        bayer[:, 0, 1::2, 0::2] = rgb[:, 1, 1::2, 0::2]
+        bayer[:, 0, 1::2, 1::2] = rgb[:, 2, 1::2, 1::2]
     elif pattern == "bggr":
-        bayer[:, 0, 0::2, 0::2] = rgb[:, 2, 0::2, 0::2]  # B
-        bayer[:, 0, 0::2, 1::2] = rgb[:, 1, 0::2, 1::2]  # Gb
-        bayer[:, 0, 1::2, 0::2] = rgb[:, 1, 1::2, 0::2]  # Gr
-        bayer[:, 0, 1::2, 1::2] = rgb[:, 0, 1::2, 1::2]  # R
+        bayer[:, 0, 0::2, 0::2] = rgb[:, 2, 0::2, 0::2]
+        bayer[:, 0, 0::2, 1::2] = rgb[:, 1, 0::2, 1::2]
+        bayer[:, 0, 1::2, 0::2] = rgb[:, 1, 1::2, 0::2]
+        bayer[:, 0, 1::2, 1::2] = rgb[:, 0, 1::2, 1::2]
     else:
         raise ValueError(f"Unsupported Bayer pattern: {pattern}")
 
@@ -58,62 +58,44 @@ def rgb_to_bayer(rgb: torch.Tensor, pattern: str = "gbrg") -> torch.Tensor:
 
 class BayerFeatureExtractor(nn.Module):
     """
-    Deterministic handcrafted Bayer features specialized for green recovery.
+    Deterministic Bayer feature bank for RGB demosaicking.
+    Output: [B, 30, H, W]
     """
 
     FEATURE_NAMES = (
-        "r_mask",
-        "g_mask",
-        "b_mask",
-        "gr_mask",
-        "gb_mask",
-        "row_parity",
-        "col_parity",
-        "laplacian",
-        "hessian_xx",
-        "hessian_yy",
-        "hessian_xy",
-        "morphological_gradient",
+        # Group A: structural reconstruction (11)
         "grad_x",
         "grad_y",
         "grad_diag_main",
         "grad_diag_anti",
         "grad_magnitude",
-        "structure_coherence",
+        "laplacian",
+        "hessian_lambda_max",
+        "hessian_lambda_min",
         "structure_anisotropy",
-        "ha_second_h",
-        "ha_second_v",
-        "ha_green_h",
-        "ha_green_v",
-        "ha_hv_disagreement",
-        "ha_residual_h",
-        "ha_residual_v",
-        "ha_residual_energy_h",
-        "ha_residual_energy_v",
-        "directional_grad_diff",
-        "directional_second_diff",
-        "line_variance_h",
-        "line_variance_v",
-        "line_variance_diff",
-        "directional_confidence",
+        "directional_variance",
+        "orientation_energy",
+        # Group B: cross-channel consistency (10)
+        "r_mask",
+        "g_mask",
+        "b_mask",
+        "green_phase_difference",
         "rg_difference",
         "bg_difference",
-        "green_phase_difference",
-        "mhc_green",
-        "mhc_minus_ha_avg",
-        "red_green_residual",
-        "blue_green_residual",
-        "stripe_x",
-        "stripe_y",
-        "checkerboard",
-        "gabor_45",
-        "gabor_135",
-        "dct_periodic",
+        "green_interp_residual",
+        "directional_green_consistency",
+        "chroma_residual_magnitude",
+        "color_difference_variance",
+        # Group C: aliasing / frequency detection (9)
         "checkerboard_energy",
-        "stripe_energy",
-        "local_mean",
-        "local_variance",
-        "gradient_energy",
+        "stripe_horizontal",
+        "stripe_vertical",
+        "alternating_diff_x",
+        "alternating_diff_y",
+        "phase_shift_energy",
+        "sinusoid_proj_x",
+        "sinusoid_proj_y",
+        "highband_alias_energy",
     )
 
     def __init__(self, pattern: str = "gbrg", eps: float = 1e-6):
@@ -147,69 +129,53 @@ class BayerFeatureExtractor(nn.Module):
                            [0.0, 0.0, 0.0],
                            [-1.0, 0.0, 1.0]], dtype=torch.float32) / 4.0).view(1, 1, 3, 3),
         )
+
         self.register_buffer(
-            "sobel_x_kernel",
-            (torch.tensor([[-1.0, 0.0, 1.0],
-                           [-2.0, 0.0, 2.0],
-                           [-1.0, 0.0, 1.0]], dtype=torch.float32) / 8.0).view(1, 1, 3, 3),
+            "grad_x_kernel",
+            _normalize_kernel(
+                torch.tensor([[-1.0, 0.0, 1.0],
+                              [-2.0, 0.0, 2.0],
+                              [-1.0, 0.0, 1.0]], dtype=torch.float32)
+            ).view(1, 1, 3, 3),
         )
         self.register_buffer(
-            "sobel_y_kernel",
-            (torch.tensor([[-1.0, -2.0, -1.0],
-                           [0.0, 0.0, 0.0],
-                           [1.0, 2.0, 1.0]], dtype=torch.float32) / 8.0).view(1, 1, 3, 3),
+            "grad_y_kernel",
+            _normalize_kernel(
+                torch.tensor([[-1.0, -2.0, -1.0],
+                              [0.0, 0.0, 0.0],
+                              [1.0, 2.0, 1.0]], dtype=torch.float32)
+            ).view(1, 1, 3, 3),
         )
         self.register_buffer(
-            "diag_main_kernel",
-            (torch.tensor([[-2.0, -1.0, 0.0],
-                           [-1.0, 0.0, 1.0],
-                           [0.0, 1.0, 2.0]], dtype=torch.float32) / 8.0).view(1, 1, 3, 3),
+            "grad_diag_main_kernel",
+            _normalize_kernel(
+                torch.tensor([[-2.0, -1.0, 0.0],
+                              [-1.0, 0.0, 1.0],
+                              [0.0, 1.0, 2.0]], dtype=torch.float32)
+            ).view(1, 1, 3, 3),
         )
         self.register_buffer(
-            "diag_anti_kernel",
-            (torch.tensor([[0.0, 1.0, 2.0],
-                           [-1.0, 0.0, 1.0],
-                           [-2.0, -1.0, 0.0]], dtype=torch.float32) / 8.0).view(1, 1, 3, 3),
+            "grad_diag_anti_kernel",
+            _normalize_kernel(
+                torch.tensor([[0.0, 1.0, 2.0],
+                              [-1.0, 0.0, 1.0],
+                              [-2.0, -1.0, 0.0]], dtype=torch.float32)
+            ).view(1, 1, 3, 3),
         )
+
         self.register_buffer(
-            "ha_second_h_kernel",
-            torch.tensor([[0.0, 0.0, 0.0, 0.0, 0.0],
-                          [0.0, 0.0, 0.0, 0.0, 0.0],
-                          [-0.5, 0.0, 1.0, 0.0, -0.5],
-                          [0.0, 0.0, 0.0, 0.0, 0.0],
-                          [0.0, 0.0, 0.0, 0.0, 0.0]], dtype=torch.float32).view(1, 1, 5, 5),
-        )
-        self.register_buffer(
-            "ha_second_v_kernel",
-            torch.tensor([[0.0, 0.0, -0.5, 0.0, 0.0],
-                          [0.0, 0.0, 0.0, 0.0, 0.0],
-                          [0.0, 0.0, 1.0, 0.0, 0.0],
-                          [0.0, 0.0, 0.0, 0.0, 0.0],
-                          [0.0, 0.0, -0.5, 0.0, 0.0]], dtype=torch.float32).view(1, 1, 5, 5),
+            "green_cross_kernel",
+            torch.tensor([[0.0, 0.25, 0.0],
+                          [0.25, 0.0, 0.25],
+                          [0.0, 0.25, 0.0]], dtype=torch.float32).view(1, 1, 3, 3),
         )
         self.register_buffer(
             "ha_green_h_kernel",
-            torch.tensor([[0.0, 0.0, 0.0, 0.0, 0.0],
-                          [0.0, 0.0, 0.0, 0.0, 0.0],
-                          [-0.25, 0.5, 0.5, 0.5, -0.25],
-                          [0.0, 0.0, 0.0, 0.0, 0.0],
-                          [0.0, 0.0, 0.0, 0.0, 0.0]], dtype=torch.float32).view(1, 1, 5, 5),
+            torch.tensor([[-0.25, 0.5, 0.5, 0.5, -0.25]], dtype=torch.float32).view(1, 1, 1, 5),
         )
         self.register_buffer(
             "ha_green_v_kernel",
-            torch.tensor([[0.0, 0.0, -0.25, 0.0, 0.0],
-                          [0.0, 0.0, 0.5, 0.0, 0.0],
-                          [0.0, 0.0, 0.5, 0.0, 0.0],
-                          [0.0, 0.0, 0.5, 0.0, 0.0],
-                          [0.0, 0.0, -0.25, 0.0, 0.0]], dtype=torch.float32).view(1, 1, 5, 5),
-        )
-        self.register_buffer(
-            "smooth5_kernel",
-            (torch.tensor([[1.0, 2.0, 3.0, 2.0, 1.0],
-                           [2.0, 4.0, 6.0, 4.0, 2.0],
-                           [3.0, 6.0, 9.0, 6.0, 3.0],
-                           [2.0, 4.0, 6.0, 4.0, 2.0],
-                           [1.0, 2.0, 3.0, 2.0, 1.0]], dtype=torch.float32) / 81.0).view(1, 1, 5, 5),
+            torch.tensor([[-0.25], [0.5], [0.5], [0.5], [-0.25]], dtype=torch.float32).view(1, 1, 5, 1),
         )
         self.register_buffer(
             "mhc_green_kernel",
@@ -220,72 +186,139 @@ class BayerFeatureExtractor(nn.Module):
                            [0.0, 0.0, -1.0, 0.0, 0.0]], dtype=torch.float32) / 8.0).view(1, 1, 5, 5),
         )
         self.register_buffer(
-            "stripe_x_kernel",
-            (torch.tensor([[0.0, 0.0, 0.0, 0.0, 0.0],
-                           [0.0, 0.0, 0.0, 0.0, 0.0],
-                           [1.0, -4.0, 6.0, -4.0, 1.0],
-                           [0.0, 0.0, 0.0, 0.0, 0.0],
-                           [0.0, 0.0, 0.0, 0.0, 0.0]], dtype=torch.float32) / 4.0).view(1, 1, 5, 5),
+            "smooth5_kernel",
+            (torch.tensor([[1.0, 2.0, 3.0, 2.0, 1.0],
+                           [2.0, 4.0, 6.0, 4.0, 2.0],
+                           [3.0, 6.0, 9.0, 6.0, 3.0],
+                           [2.0, 4.0, 6.0, 4.0, 2.0],
+                           [1.0, 2.0, 3.0, 2.0, 1.0]], dtype=torch.float32) / 81.0).view(1, 1, 5, 5),
         )
         self.register_buffer(
-            "stripe_y_kernel",
-            (torch.tensor([[0.0, 0.0, 1.0, 0.0, 0.0],
-                           [0.0, 0.0, -4.0, 0.0, 0.0],
-                           [0.0, 0.0, 6.0, 0.0, 0.0],
-                           [0.0, 0.0, -4.0, 0.0, 0.0],
-                           [0.0, 0.0, 1.0, 0.0, 0.0]], dtype=torch.float32) / 4.0).view(1, 1, 5, 5),
+            "box5_kernel",
+            (torch.ones(5, 5, dtype=torch.float32) / 25.0).view(1, 1, 5, 5),
         )
+        self.register_buffer(
+            "box_h_kernel",
+            (torch.ones(1, 5, dtype=torch.float32) / 5.0).view(1, 1, 1, 5),
+        )
+        self.register_buffer(
+            "box_v_kernel",
+            (torch.ones(5, 1, dtype=torch.float32) / 5.0).view(1, 1, 5, 1),
+        )
+
         self.register_buffer(
             "checkerboard_kernel",
-            (torch.tensor([[1.0, -1.0, 1.0],
-                           [-1.0, 1.0, -1.0],
-                           [1.0, -1.0, 1.0]], dtype=torch.float32) / 9.0).view(1, 1, 3, 3),
+            _normalize_kernel(
+                torch.tensor([[1.0, -1.0, 1.0, -1.0, 1.0],
+                              [-1.0, 1.0, -1.0, 1.0, -1.0],
+                              [1.0, -1.0, 1.0, -1.0, 1.0],
+                              [-1.0, 1.0, -1.0, 1.0, -1.0],
+                              [1.0, -1.0, 1.0, -1.0, 1.0]], dtype=torch.float32)
+            ).view(1, 1, 5, 5),
         )
         self.register_buffer(
+            "stripe_horizontal_kernel",
+            _normalize_kernel(
+                torch.tensor([[1.0, -1.0, 1.0, -1.0, 1.0],
+                              [1.0, -1.0, 1.0, -1.0, 1.0],
+                              [1.0, -1.0, 1.0, -1.0, 1.0],
+                              [1.0, -1.0, 1.0, -1.0, 1.0],
+                              [1.0, -1.0, 1.0, -1.0, 1.0]], dtype=torch.float32)
+            ).view(1, 1, 5, 5),
+        )
+        self.register_buffer(
+            "stripe_vertical_kernel",
+            _normalize_kernel(
+                torch.tensor([[1.0, 1.0, 1.0, 1.0, 1.0],
+                              [-1.0, -1.0, -1.0, -1.0, -1.0],
+                              [1.0, 1.0, 1.0, 1.0, 1.0],
+                              [-1.0, -1.0, -1.0, -1.0, -1.0],
+                              [1.0, 1.0, 1.0, 1.0, 1.0]], dtype=torch.float32)
+            ).view(1, 1, 5, 5),
+        )
+        self.register_buffer(
+            "alt_x_kernel",
+            _normalize_kernel(
+                torch.tensor([[1.0, -1.0, 1.0, -1.0, 1.0]], dtype=torch.float32).repeat(5, 1)
+            ).view(1, 1, 5, 5),
+        )
+        self.register_buffer(
+            "alt_y_kernel",
+            _normalize_kernel(
+                torch.tensor([[1.0], [-1.0], [1.0], [-1.0], [1.0]], dtype=torch.float32).repeat(1, 5)
+            ).view(1, 1, 5, 5),
+        )
+
+        sin_x = torch.sin(2.0 * math.pi * torch.arange(5, dtype=torch.float32) / 5.0)
+        cos_x = torch.cos(2.0 * math.pi * torch.arange(5, dtype=torch.float32) / 5.0)
+        sin_y = sin_x.clone()
+        cos_y = cos_x.clone()
+        self.register_buffer(
+            "sinusoid_x_kernel",
+            _normalize_kernel(sin_x.repeat(5, 1)).view(1, 1, 5, 5),
+        )
+        self.register_buffer(
+            "sinusoid_y_kernel",
+            _normalize_kernel(sin_y.view(5, 1).repeat(1, 5)).view(1, 1, 5, 5),
+        )
+        self.register_buffer(
+            "phase_x_kernel",
+            _normalize_kernel(cos_x.repeat(5, 1)).view(1, 1, 5, 5),
+        )
+        self.register_buffer(
+            "phase_y_kernel",
+            _normalize_kernel(cos_y.view(5, 1).repeat(1, 5)).view(1, 1, 5, 5),
+        )
+
+        self.register_buffer(
             "gabor_45_kernel",
-            self._make_gabor(theta=math.pi / 4.0, sigma=1.1, lambd=3.0, gamma=0.65).view(1, 1, 5, 5),
+            self._make_gabor(size=5, theta=math.pi / 4.0),
         )
         self.register_buffer(
             "gabor_135_kernel",
-            self._make_gabor(theta=3.0 * math.pi / 4.0, sigma=1.1, lambd=3.0, gamma=0.65).view(1, 1, 5, 5),
+            self._make_gabor(size=5, theta=3.0 * math.pi / 4.0),
         )
         self.register_buffer(
-            "dct_periodic_kernel",
-            self._make_dct_like(u=2, v=2, size=5).view(1, 1, 5, 5),
+            "dct_highband_kernel",
+            self._make_dct_like(size=5, u=2, v=2),
+        )
+        self.register_buffer(
+            "hf_band_kernel",
+            _normalize_kernel(
+                torch.tensor([[1.0, -2.0, 1.0],
+                              [-2.0, 4.0, -2.0],
+                              [1.0, -2.0, 1.0]], dtype=torch.float32)
+            ).view(1, 1, 3, 3),
         )
 
-    @staticmethod
-    def _make_gabor(theta: float, sigma: float, lambd: float, gamma: float) -> torch.Tensor:
-        coords = torch.arange(-2, 3, dtype=torch.float32)
+    def _make_gabor(
+        self,
+        size: int,
+        theta: float,
+        sigma: float = 1.1,
+        wavelength: float = 3.0,
+        gamma: float = 0.65,
+    ) -> torch.Tensor:
+        radius = size // 2
+        coords = torch.arange(-radius, radius + 1, dtype=torch.float32)
         yy, xx = torch.meshgrid(coords, coords, indexing="ij")
         x_theta = xx * math.cos(theta) + yy * math.sin(theta)
         y_theta = -xx * math.sin(theta) + yy * math.cos(theta)
-        envelope = torch.exp(-(x_theta ** 2 + (gamma ** 2) * y_theta ** 2) / (2.0 * sigma ** 2))
-        carrier = torch.cos(2.0 * math.pi * x_theta / lambd)
-        kernel = envelope * carrier
-        kernel = kernel - kernel.mean()
-        return kernel / kernel.abs().sum().clamp_min(1e-6)
+        envelope = torch.exp(-(x_theta.square() + (gamma * y_theta).square()) / (2.0 * sigma * sigma))
+        carrier = torch.cos(2.0 * math.pi * x_theta / wavelength)
+        return _normalize_kernel(envelope * carrier).view(1, 1, size, size)
 
-    @staticmethod
-    def _make_dct_like(u: int, v: int, size: int) -> torch.Tensor:
+    def _make_dct_like(self, size: int, u: int, v: int) -> torch.Tensor:
         coords = torch.arange(size, dtype=torch.float32)
-        yy, xx = torch.meshgrid(coords, coords, indexing="ij")
-        kernel = (
-            torch.cos(math.pi * (2.0 * xx + 1.0) * u / (2.0 * size))
-            * torch.cos(math.pi * (2.0 * yy + 1.0) * v / (2.0 * size))
-        )
-        kernel = kernel - kernel.mean()
-        return kernel / kernel.abs().sum().clamp_min(1e-6)
+        basis_x = torch.cos(math.pi * (coords + 0.5) * u / size)
+        basis_y = torch.cos(math.pi * (coords + 0.5) * v / size)
+        return _normalize_kernel(torch.outer(basis_y, basis_x)).view(1, 1, size, size)
 
     def _conv_same(self, x: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
         kh, kw = kernel.shape[-2:]
         pad = (kw // 2, kw // 2, kh // 2, kh // 2)
-        return F.conv2d(F.pad(x, pad, mode="reflect"), kernel.to(dtype=x.dtype))
-
-    def _avg_pool_same(self, x: torch.Tensor, kernel_size) -> torch.Tensor:
-        kh, kw = _to_pair(kernel_size)
-        pad = (kw // 2, kw // 2, kh // 2, kh // 2)
-        return F.avg_pool2d(F.pad(x, pad, mode="reflect"), kernel_size=(kh, kw), stride=1)
+        x = F.pad(x, pad, mode="reflect")
+        return F.conv2d(x, kernel.to(device=x.device, dtype=x.dtype))
 
     def _normalized_sparse_fill(self, signal: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         num = self._conv_same(signal, self.smooth5_kernel)
@@ -293,21 +326,14 @@ class BayerFeatureExtractor(nn.Module):
         return num / den
 
     def _build_masks(self, bayer: torch.Tensor) -> Dict[str, torch.Tensor]:
-        _, _, H, W = bayer.shape
-        shape = (1, 1, H, W)
-        dtype = bayer.dtype
-        device = bayer.device
+        _, _, h, w = bayer.shape
+        shape = (1, 1, h, w)
 
-        r_mask = torch.zeros(shape, dtype=dtype, device=device)
-        g_mask = torch.zeros(shape, dtype=dtype, device=device)
-        b_mask = torch.zeros(shape, dtype=dtype, device=device)
-        gr_mask = torch.zeros(shape, dtype=dtype, device=device)
-        gb_mask = torch.zeros(shape, dtype=dtype, device=device)
-        row_parity = torch.zeros(shape, dtype=dtype, device=device)
-        col_parity = torch.zeros(shape, dtype=dtype, device=device)
-
-        row_parity[:, :, 1::2, :] = 1.0
-        col_parity[:, :, :, 1::2] = 1.0
+        r_mask = bayer.new_zeros(shape)
+        g_mask = bayer.new_zeros(shape)
+        b_mask = bayer.new_zeros(shape)
+        gr_mask = bayer.new_zeros(shape)
+        gb_mask = bayer.new_zeros(shape)
 
         if self.pattern == "gbrg":
             gb_mask[:, :, 0::2, 0::2] = 1.0
@@ -339,217 +365,159 @@ class BayerFeatureExtractor(nn.Module):
             "b": b_mask.expand_as(bayer),
             "gr": gr_mask.expand_as(bayer),
             "gb": gb_mask.expand_as(bayer),
-            "row": row_parity.expand_as(bayer),
-            "col": col_parity.expand_as(bayer),
         }
-
-    def _mhc_green_estimate(self, mosaic: torch.Tensor, g_mask: torch.Tensor) -> torch.Tensor:
-        filtered = self._conv_same(mosaic, self.mhc_green_kernel)
-        return torch.where(g_mask > 0.5, mosaic, filtered)
 
     def extract_feature_dict(self, bayer: torch.Tensor) -> "OrderedDict[str, torch.Tensor]":
         if bayer.dim() != 4 or bayer.shape[1] != 1:
             raise ValueError("BayerFeatureExtractor expects [B,1,H,W] input.")
 
+        raw = bayer
         masks = self._build_masks(bayer)
         r_mask = masks["r"]
         g_mask = masks["g"]
         b_mask = masks["b"]
         gr_mask = masks["gr"]
         gb_mask = masks["gb"]
-        row_parity = masks["row"]
-        col_parity = masks["col"]
 
-        raw = bayer
-        gx = self._conv_same(raw, self.sobel_x_kernel)
-        gy = self._conv_same(raw, self.sobel_y_kernel)
-        gdiag_main = self._conv_same(raw, self.diag_main_kernel)
-        gdiag_anti = self._conv_same(raw, self.diag_anti_kernel)
+        gx = self._conv_same(raw, self.grad_x_kernel)
+        gy = self._conv_same(raw, self.grad_y_kernel)
+        gd_main = self._conv_same(raw, self.grad_diag_main_kernel)
+        gd_anti = self._conv_same(raw, self.grad_diag_anti_kernel)
         grad_mag = torch.sqrt(gx.square() + gy.square() + self.eps)
-
-        jxx = self._avg_pool_same(gx.square(), 5)
-        jyy = self._avg_pool_same(gy.square(), 5)
-        jxy = self._avg_pool_same(gx * gy, 5)
-        structure_den = (jxx + jyy).clamp_min(self.eps)
-        structure_coherence = torch.sqrt((jxx - jyy).square() + 4.0 * jxy.square() + self.eps) / structure_den
-        structure_anisotropy = (jxx - jyy) / structure_den
-
         laplacian = self._conv_same(raw, self.laplacian_kernel)
-        hessian_xx = self._conv_same(raw, self.hessian_xx_kernel)
-        hessian_yy = self._conv_same(raw, self.hessian_yy_kernel)
-        hessian_xy = self._conv_same(raw, self.hessian_xy_kernel)
 
-        # Morphological span highlights zippering and edge polarity flips that hurt green interpolation.
-        dilated = F.max_pool2d(F.pad(raw, (1, 1, 1, 1), mode="reflect"), kernel_size=3, stride=1)
-        eroded = -F.max_pool2d(F.pad(-raw, (1, 1, 1, 1), mode="reflect"), kernel_size=3, stride=1)
-        morph_gradient = dilated - eroded
+        hxx = self._conv_same(raw, self.hessian_xx_kernel)
+        hyy = self._conv_same(raw, self.hessian_yy_kernel)
+        hxy = self._conv_same(raw, self.hessian_xy_kernel)
+        h_disc = torch.sqrt((hxx - hyy).square() + 4.0 * hxy.square() + self.eps)
+        h_lambda_max = 0.5 * (hxx + hyy + h_disc)
+        h_lambda_min = 0.5 * (hxx + hyy - h_disc)
 
-        ha_second_h = self._conv_same(raw, self.ha_second_h_kernel)
-        ha_second_v = self._conv_same(raw, self.ha_second_v_kernel)
-        ha_green_h = self._conv_same(raw, self.ha_green_h_kernel)
-        ha_green_v = self._conv_same(raw, self.ha_green_v_kernel)
-        ha_avg = 0.5 * (ha_green_h + ha_green_v)
-        ha_hv_disagreement = (ha_green_h - ha_green_v).abs()
-        ha_residual_h = ha_green_h - raw
-        ha_residual_v = ha_green_v - raw
-        ha_residual_energy_h = self._avg_pool_same(ha_residual_h.abs(), (1, 5))
-        ha_residual_energy_v = self._avg_pool_same(ha_residual_v.abs(), (5, 1))
+        jxx = self._conv_same(gx.square(), self.box5_kernel)
+        jyy = self._conv_same(gy.square(), self.box5_kernel)
+        jxy = self._conv_same(gx * gy, self.box5_kernel)
+        structure_den = (jxx + jyy).clamp_min(self.eps)
+        structure_anisotropy = torch.sqrt((jxx - jyy).square() + 4.0 * jxy.square() + self.eps) / structure_den
 
-        line_mean_h = self._avg_pool_same(raw, (1, 5))
-        line_mean_v = self._avg_pool_same(raw, (5, 1))
-        line_var_h = self._avg_pool_same(raw.square(), (1, 5)) - line_mean_h.square()
-        line_var_v = self._avg_pool_same(raw.square(), (5, 1)) - line_mean_v.square()
-        directional_grad_diff = gx.abs() - gy.abs()
-        directional_second_diff = ha_second_h.abs() - ha_second_v.abs()
-        line_var_diff = line_var_h - line_var_v
-        directional_confidence = (line_var_v - line_var_h) / (line_var_h + line_var_v + self.eps)
+        mean_h = self._conv_same(raw, self.box_h_kernel)
+        mean_v = self._conv_same(raw, self.box_v_kernel)
+        var_h = self._conv_same(raw.square(), self.box_h_kernel) - mean_h.square()
+        var_v = self._conv_same(raw.square(), self.box_v_kernel) - mean_v.square()
+        directional_variance = var_h - var_v
+        orientation_energy = torch.sqrt(self._conv_same(gx.square() + gy.square(), self.box5_kernel) + self.eps)
+
+        green_bilinear = torch.where(g_mask > 0.5, raw, self._conv_same(raw, self.green_cross_kernel))
+        ha_green_h = torch.where(g_mask > 0.5, raw, self._conv_same(raw, self.ha_green_h_kernel))
+        ha_green_v = torch.where(g_mask > 0.5, raw, self._conv_same(raw, self.ha_green_v_kernel))
+        mhc_green = torch.where(g_mask > 0.5, raw, self._conv_same(raw, self.mhc_green_kernel))
 
         r_sparse = raw * r_mask
         b_sparse = raw * b_mask
         g_sparse = raw * g_mask
         gr_sparse = raw * gr_mask
         gb_sparse = raw * gb_mask
-
         dense_r = self._normalized_sparse_fill(r_sparse, r_mask)
         dense_b = self._normalized_sparse_fill(b_sparse, b_mask)
         dense_g = self._normalized_sparse_fill(g_sparse, g_mask)
         dense_gr = self._normalized_sparse_fill(gr_sparse, gr_mask)
         dense_gb = self._normalized_sparse_fill(gb_sparse, gb_mask)
 
-        rg_difference = dense_r - dense_g
-        bg_difference = dense_b - dense_g
+        rg_diff = dense_r - dense_g
+        bg_diff = dense_b - dense_g
         green_phase_difference = dense_gr - dense_gb
-        mhc_green = self._mhc_green_estimate(raw, g_mask)
-        mhc_minus_ha_avg = mhc_green - ha_avg
-        red_green_residual = dense_r - mhc_green
-        blue_green_residual = dense_b - mhc_green
+        green_interp_residual = mhc_green - green_bilinear
+        directional_green_consistency = (ha_green_h - ha_green_v).abs()
+        chroma_residual_magnitude = torch.sqrt(rg_diff.square() + bg_diff.square() + self.eps)
+        color_diff_variance = (
+            self._conv_same(rg_diff.square(), self.box5_kernel) - self._conv_same(rg_diff, self.box5_kernel).square()
+            + self._conv_same(bg_diff.square(), self.box5_kernel) - self._conv_same(bg_diff, self.box5_kernel).square()
+        )
 
-        stripe_x = self._conv_same(raw, self.stripe_x_kernel)
-        stripe_y = self._conv_same(raw, self.stripe_y_kernel)
-        checkerboard = self._conv_same(raw, self.checkerboard_kernel)
-        gabor_45 = self._conv_same(raw, self.gabor_45_kernel)
-        gabor_135 = self._conv_same(raw, self.gabor_135_kernel)
-        dct_periodic = self._conv_same(raw, self.dct_periodic_kernel)
-        checkerboard_energy = self._avg_pool_same(checkerboard.abs(), 5)
-        stripe_energy = self._avg_pool_same(stripe_x.abs() + stripe_y.abs(), 5)
-
-        local_mean = self._avg_pool_same(raw, 5)
-        local_variance = self._avg_pool_same(raw.square(), 5) - local_mean.square()
-        gradient_energy = self._avg_pool_same(grad_mag.square(), 5)
+        checkerboard_energy = self._conv_same(raw, self.checkerboard_kernel).abs()
+        stripe_horizontal = self._conv_same(raw, self.stripe_horizontal_kernel).abs()
+        stripe_vertical = self._conv_same(raw, self.stripe_vertical_kernel).abs()
+        alternating_diff_x = self._conv_same(raw, self.alt_x_kernel).abs()
+        alternating_diff_y = self._conv_same(raw, self.alt_y_kernel).abs()
+        sinusoid_proj_x = self._conv_same(raw, self.sinusoid_x_kernel)
+        sinusoid_proj_y = self._conv_same(raw, self.sinusoid_y_kernel)
+        phase_shift_energy = torch.sqrt(
+            self._conv_same(raw, self.phase_x_kernel).square()
+            + self._conv_same(raw, self.phase_y_kernel).square()
+            + sinusoid_proj_x.square()
+            + sinusoid_proj_y.square()
+            + self.eps
+        )
+        highband_alias_energy = (
+            self._conv_same(raw, self.hf_band_kernel).abs()
+            + self._conv_same(raw, self.gabor_45_kernel).abs()
+            + self._conv_same(raw, self.gabor_135_kernel).abs()
+            + self._conv_same(raw, self.dct_highband_kernel).abs()
+        )
 
         features: "OrderedDict[str, torch.Tensor]" = OrderedDict()
 
-        # CFA masks tell the decoder which color was physically measured at a site.
-        features["r_mask"] = r_mask
-        # Green support marks locations where the true target channel is already sampled.
-        features["g_mask"] = g_mask
-        # Blue support helps the decoder reason about color-opponent interpolation cases.
-        features["b_mask"] = b_mask
-        # The first green phase distinguishes one green lattice from the other.
-        features["gr_mask"] = gr_mask
-        # The second green phase separates the Bayer quincunx into parity-aware groups.
-        features["gb_mask"] = gb_mask
-        # Row parity acts as a cheap positional encoding for CFA phase.
-        features["row_parity"] = row_parity
-        # Column parity completes the deterministic Bayer positional code.
-        features["col_parity"] = col_parity
-
-        # Laplacian emphasizes local curvature where naive green interpolation rings.
-        features["laplacian"] = laplacian
-        # Horizontal Hessian detects curvature across columns, important at vertical edges.
-        features["hessian_xx"] = hessian_xx
-        # Vertical Hessian detects curvature across rows, important at horizontal edges.
-        features["hessian_yy"] = hessian_yy
-        # Mixed Hessian highlights slanted structures that often cause zippering.
-        features["hessian_xy"] = hessian_xy
-        # Morphological gradient captures edge span and aliasing bursts beyond linear filters.
-        features["morphological_gradient"] = morph_gradient
-
-        # Horizontal first derivative is the basic cue for edge-aware green interpolation.
+        # Structural: horizontal gradient measures left-right edge transitions for edge-directed reconstruction.
         features["grad_x"] = gx
-        # Vertical first derivative complements the directional edge test.
+        # Structural: vertical gradient measures top-bottom edge transitions where green must respect contour flow.
         features["grad_y"] = gy
-        # Main-diagonal derivative helps with thin slanted structures and roof lines.
-        features["grad_diag_main"] = gdiag_main
-        # Anti-diagonal derivative helps where Bayer aliasing follows the opposite slant.
-        features["grad_diag_anti"] = gdiag_anti
-        # Gradient magnitude marks texture density and edge strength for confidence weighting.
+        # Structural: main-diagonal gradient captures thin slanted lines that bilinear rules often blur.
+        features["grad_diag_main"] = gd_main
+        # Structural: anti-diagonal gradient captures the opposite slant family that appears in roof/fence textures.
+        features["grad_diag_anti"] = gd_anti
+        # Structural: gradient magnitude summarizes true edge strength and helps separate texture from flat regions.
         features["grad_magnitude"] = grad_mag
-        # Structure coherence tells the decoder when a dominant orientation is reliable.
-        features["structure_coherence"] = structure_coherence
-        # Structure anisotropy distinguishes horizontal-vs-vertical dominance with sign.
+        # Structural: Laplacian measures local curvature where zippering and ringing usually appear first.
+        features["laplacian"] = laplacian
+        # Structural: major Hessian eigenvalue approximates dominant second-order curvature for sharp edges and ridges.
+        features["hessian_lambda_max"] = h_lambda_max
+        # Structural: minor Hessian eigenvalue approximates orthogonal curvature and helps distinguish lines from corners.
+        features["hessian_lambda_min"] = h_lambda_min
+        # Structural: structure-tensor anisotropy measures whether local energy is concentrated along one orientation.
         features["structure_anisotropy"] = structure_anisotropy
+        # Structural: directional variance compares horizontal and vertical neighborhood variability for edge direction choice.
+        features["directional_variance"] = directional_variance
+        # Structural: pooled orientation energy keeps a stable local estimate of oriented detail strength for texture recovery.
+        features["orientation_energy"] = orientation_energy
 
-        # Hamilton-Adams horizontal second derivative measures cross-edge oscillation.
-        features["ha_second_h"] = ha_second_h
-        # Hamilton-Adams vertical second derivative is the vertical counterpart.
-        features["ha_second_v"] = ha_second_v
-        # Horizontal tentative green is a classical directional estimate to refine.
-        features["ha_green_h"] = ha_green_h
-        # Vertical tentative green provides the competing classical hypothesis.
-        features["ha_green_v"] = ha_green_v
-        # HA disagreement exposes ambiguous edge directions and color zipper risk.
-        features["ha_hv_disagreement"] = ha_hv_disagreement
-        # Horizontal HA residual reveals where raw and horizontal green conflict.
-        features["ha_residual_h"] = ha_residual_h
-        # Vertical HA residual reveals where raw and vertical green conflict.
-        features["ha_residual_v"] = ha_residual_v
-        # Horizontal residual energy is a confidence map for line-wise interpolation.
-        features["ha_residual_energy_h"] = ha_residual_energy_h
-        # Vertical residual energy is the competing confidence map.
-        features["ha_residual_energy_v"] = ha_residual_energy_v
-
-        # Gradient difference is a compact directional selector used by many green estimators.
-        features["directional_grad_diff"] = directional_grad_diff
-        # Second-derivative difference sharpens that selector around oscillatory textures.
-        features["directional_second_diff"] = directional_second_diff
-        # Horizontal line variance mirrors LMMSE-style local directional uncertainty.
-        features["line_variance_h"] = line_var_h
-        # Vertical line variance is the orthogonal uncertainty estimate.
-        features["line_variance_v"] = line_var_v
-        # Variance difference tells the decoder which axis is smoother for green completion.
-        features["line_variance_diff"] = line_var_diff
-        # Normalized directional confidence keeps that decision bounded and scale-robust.
-        features["directional_confidence"] = directional_confidence
-
-        # Dense R-G difference approximates a classical color-difference smoothness prior.
-        features["rg_difference"] = rg_difference
-        # Dense B-G difference supplies the blue-side version of the same prior.
-        features["bg_difference"] = bg_difference
-        # Green-phase difference reveals imbalance between the two green sub-lattices.
+        # Cross-channel: R mask marks locations where red is the trustworthy anchor sample in the Bayer lattice.
+        features["r_mask"] = r_mask
+        # Cross-channel: G mask marks the dense green sampling support that stabilizes luminance-like reconstruction.
+        features["g_mask"] = g_mask
+        # Cross-channel: B mask marks blue support so color-difference priors remain phase-aware.
+        features["b_mask"] = b_mask
+        # Cross-channel: green-phase difference exposes imbalance between the two green sub-lattices in the CFA.
         features["green_phase_difference"] = green_phase_difference
-        # Malvar-He-Cutler green is a strong linear baseline hypothesis on Bayer data.
-        features["mhc_green"] = mhc_green
-        # MHC-vs-HA disagreement highlights where linear and directional rules diverge.
-        features["mhc_minus_ha_avg"] = mhc_minus_ha_avg
-        # Red-green residual indicates cross-channel inconsistency around red samples.
-        features["red_green_residual"] = red_green_residual
-        # Blue-green residual indicates the same inconsistency around blue samples.
-        features["blue_green_residual"] = blue_green_residual
+        # Cross-channel: R-G difference encodes chroma consistency around red samples to suppress false color.
+        features["rg_difference"] = rg_diff
+        # Cross-channel: B-G difference provides the complementary chroma prior around blue samples.
+        features["bg_difference"] = bg_diff
+        # Cross-channel: green interpolation residual shows where classical green estimators disagree and need learned correction.
+        features["green_interp_residual"] = green_interp_residual
+        # Cross-channel: directional green consistency indicates whether horizontal and vertical green hypotheses agree.
+        features["directional_green_consistency"] = directional_green_consistency
+        # Cross-channel: chroma residual magnitude summarizes overall color-difference tension in the local neighborhood.
+        features["chroma_residual_magnitude"] = chroma_residual_magnitude
+        # Cross-channel: color-difference variance marks unstable chroma regions where naive interpolation leaks color artifacts.
+        features["color_difference_variance"] = color_diff_variance
 
-        # X-stripe detector responds to narrow periodic vertical structures like fence slats.
-        features["stripe_x"] = stripe_x
-        # Y-stripe detector responds to narrow periodic horizontal textures.
-        features["stripe_y"] = stripe_y
-        # Checkerboard response detects Bayer-phase aliasing and moire-like alternation.
-        features["checkerboard"] = checkerboard
-        # A 45-degree Gabor response helps the decoder model slanted repeating edges.
-        features["gabor_45"] = gabor_45
-        # A 135-degree Gabor response covers the opposite slanted orientation family.
-        features["gabor_135"] = gabor_135
-        # The DCT-like periodic response captures compact local frequency content.
-        features["dct_periodic"] = dct_periodic
-        # Checkerboard energy turns oscillatory alternation into a local confidence map.
+        # Aliasing: checkerboard energy responds to CFA-phase alternation and moire-like sampling artifacts.
         features["checkerboard_energy"] = checkerboard_energy
-        # Stripe energy summarizes repeating high-frequency texture strength.
-        features["stripe_energy"] = stripe_energy
-
-        # Local mean gives the decoder a low-frequency brightness anchor for green recovery.
-        features["local_mean"] = local_mean
-        # Local variance marks textured zones where interpolation should trust directionality.
-        features["local_variance"] = local_variance
-        # Gradient energy summarizes overall local activity for periodic-structure modeling.
-        features["gradient_energy"] = gradient_energy
+        # Aliasing: horizontal stripe response detects repeated vertical plank/slat patterns that are easy to alias.
+        features["stripe_horizontal"] = stripe_horizontal
+        # Aliasing: vertical stripe response detects repeated horizontal banding and zipper-prone line patterns.
+        features["stripe_vertical"] = stripe_vertical
+        # Aliasing: alternating x-difference is a direct indicator of high-frequency horizontal phase alternation.
+        features["alternating_diff_x"] = alternating_diff_x
+        # Aliasing: alternating y-difference is the vertical counterpart for row-wise aliasing and zippering.
+        features["alternating_diff_y"] = alternating_diff_y
+        # Aliasing: phase-shift energy captures quadrature responses that help the SIREN model periodic phase changes.
+        features["phase_shift_energy"] = phase_shift_energy
+        # Aliasing: sinusoidal x projection measures periodic horizontal frequency content created by real texture or CFA aliasing.
+        features["sinusoid_proj_x"] = sinusoid_proj_x
+        # Aliasing: sinusoidal y projection measures periodic vertical frequency content and complements the x projection.
+        features["sinusoid_proj_y"] = sinusoid_proj_y
+        # Aliasing: high-band alias energy pools Gabor, DCT-like, and high-pass responses to localize troublesome frequencies.
+        features["highband_alias_energy"] = highband_alias_energy
 
         if tuple(features.keys()) != self.feature_names:
             raise RuntimeError("Feature ordering mismatch in BayerFeatureExtractor.")
@@ -558,31 +526,40 @@ class BayerFeatureExtractor(nn.Module):
 
     def forward(self, bayer: torch.Tensor) -> torch.Tensor:
         feature_dict = self.extract_feature_dict(bayer)
-        return torch.cat(list(feature_dict.values()), dim=1)
+        features = torch.cat(list(feature_dict.values()), dim=1)
+        if features.shape[1] != 30:
+            raise RuntimeError(f"Expected 30 feature channels, got {features.shape[1]}.")
+        return features
 
 
 class NerdFeatureModel(nn.Module):
     """
-    Green-only variant:
-    Bayer [B,1,H,W] -> handcrafted Bayer features -> NeRD decoder -> green [B,1,H,W].
+    Bayer [B,1,H,W] -> handcrafted Bayer features [B,30,H,W] -> NeRD decoder -> RGB [B,3,H,W]
     """
 
-    def __init__(self,
-                 pattern: str = "gbrg",
-                 patch_size: int = 5,
-                 hidden: int = 256,
-                 omega_0: float = 30.0):
+    def __init__(
+        self,
+        in_ch: int = 1,
+        out_ch: int = 3,
+        pattern: str = "gbrg",
+        patch_size: int = 5,
+        hidden: int = 256,
+        omega_0: float = 30.0,
+    ):
         super().__init__()
+        if in_ch != 1:
+            raise ValueError("NerdFeatureModel expects a single Bayer input channel.")
+
         self.feature_extractor = BayerFeatureExtractor(pattern=pattern)
         self.decoder = NeRDPixelDecoder.NeRDPixelDecoder(
             feature_channels=self.feature_extractor.num_features,
             patch_size=patch_size,
             hidden=hidden,
-            out_channels=1,
+            out_channels=out_ch,
             omega_0=omega_0,
         )
 
     def forward(self, bayer: torch.Tensor) -> torch.Tensor:
         features = self.feature_extractor(bayer)
-        green = self.decoder(features)
-        return green
+        rgb = self.decoder(features)
+        return rgb

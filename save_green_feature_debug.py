@@ -181,15 +181,26 @@ def main():
 
     build_contact_sheet(feature_images, os.path.join(out_dir, "contact_sheet.png"))
 
-    periodic_keys = [
+    periodic_candidates = [
         "stripe_x",
         "stripe_y",
-        "checkerboard_energy",
         "stripe_energy",
+        "checkerboard_energy",
         "gabor_45",
         "gabor_135",
         "dct_periodic",
+        "stripe_horizontal",
+        "stripe_vertical",
+        "alternating_diff_x",
+        "alternating_diff_y",
+        "phase_shift_energy",
+        "sinusoid_proj_x",
+        "sinusoid_proj_y",
+        "highband_alias_energy",
     ]
+    periodic_keys = [key for key in periodic_candidates if key in feature_dict]
+    if not periodic_keys:
+        raise RuntimeError("No periodic-response features found in feature extractor output.")
     periodic_score = sum(feature_dict[key].abs() for key in periodic_keys)
     periodic_map = periodic_score[0, 0].cpu().numpy()
     periodic_vis, periodic_stats = normalize_feature_map(periodic_map)

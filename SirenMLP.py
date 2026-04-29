@@ -4,8 +4,8 @@ import torch.nn as nn
 
 # ─────────────────────────────────────────────────────────
 # SIREN MLP
-# Input:  [N, 3202]  (3200 local encoding + 2 coords)
-# Output: [N, 3]     (RGB per pixel)
+# Input:  [N, C * patch_size^2 + 2]
+# Output: [N, out_dim]     (per-pixel prediction)
 #
 # Architecture (paper Fig. 2):
 #   x → Layer1 → Layer2 → [cat x] → Layer3 →
@@ -15,13 +15,14 @@ import torch.nn as nn
 # ─────────────────────────────────────────────────────────
 class SirenMLP(nn.Module):
     def __init__(self,
-                 in_dim:  int   = 3202,   # 3200 + 2
+                 in_dim:  int   = 3202,   # local encoding + 2
                  hidden:  int   = 256,
-                 out_dim: int   = 3,      # RGB
+                 out_dim: int   = 3,      # output channels
                  omega_0: float = 30.0):
         super().__init__()
 
         self.in_dim = in_dim
+        self.feature_dim = in_dim - 2
 
         # The author release uses omega_0=30 for all hidden sine layers and
         # does not mark the first layer as "is_first" for initialization.
@@ -30,8 +31,7 @@ class SirenMLP(nn.Module):
         # Layer 2 — hidden(256)
         self.layer2 = SirenLayer(hidden, hidden, omega_0=omega_0)
 
-        # Layer 3 — skip: input concatenated before this layer
-        # in_dim = hidden(256) + original_input(3202) = 3458
+        # Layer 3 — skip: input feature vector concatenated before this layer.
         self.layer3 = SirenLayer(hidden + in_dim - 2, hidden, omega_0=omega_0)
 
         # Layer 4 — hidden(256)
@@ -45,27 +45,27 @@ class SirenMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Input:  x [N, 3202]  where N = B*H*W
-        Output:   [N, 3]     RGB values before clamping
+        Input:  x [N, in_dim]  where N = B*H*W
+        Output: [N, out_dim]
         """
-        # Match the author implementation: only the 3200-d feature vector
+        # Match the author implementation: only the local feature vector
         # is reused in the MLP skip connections, not the (x, y) coordinates.
-        skip = x[..., :3200]
+        skip = x[..., :self.feature_dim]
 
         h = self.layer1(x)
         h = self.layer2(h)
 
         h = torch.cat([skip, h], dim=-1)
         h = self.layer3(h)
-        # [N, 256+3202] → [N, 256]  ← skip at layer 3
+        # [N, feature_dim + 256] → [N, 256]  ← skip at layer 3
 
         h = self.layer4(h) # [N, 256]
 
         h = torch.cat([skip, h], dim=-1)
         h = self.layer5(h)
-        # [N, 256+3202] → [N, 256]  ← skip at layer 5
+        # [N, feature_dim + 256] → [N, 256]  ← skip at layer 5
 
-        rgb = self.out(h) # [N, 3]
+        out = self.out(h) # [N, out_dim]
 
-        return rgb
+        return out
     

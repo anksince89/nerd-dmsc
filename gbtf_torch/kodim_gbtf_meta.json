@@ -1,0 +1,16 @@
+{
+  "input": "/Users/ankitkumar/Documents/nerd-dmsc/data/val/kodim19.png",
+  "output": "/Users/ankitkumar/Documents/nerd-dmsc/gbtf_torch/kodim_gbtf.png",
+  "mosaic_preview": "/Users/ankitkumar/Documents/nerd-dmsc/gbtf_torch/kodim_mosaic.png",
+  "device": "cpu",
+  "pattern": "grbg",
+  "algorithm": "GBTF",
+  "sigma": 1.0,
+  "psnr_vs_source": 40.016019371319885,
+  "shape": [
+    1,
+    3,
+    768,
+    512
+  ]
+}
